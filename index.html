@@ -1518,7 +1518,31 @@ function editCompra(i){
   $('qCapCosto').value=Number(x.costo||0); $('qCapPrecio').value=x.precio==null?'':Number(x.precio); $('qCapObs').value=x.obs||'';
   $('qCapStatus').textContent='Editando la compra seleccionada. Las compras existentes se editan como una sola línea.'; renderCompraDraft(); window.scrollTo({top:0,behavior:'smooth'});
 }
-async function deleteCompra(i){if(!data.compras[i])return;const target=data.compras[i];const audited=(data.correccionesCompras||[]).some(c=>{const byFolio=!!target.folio&&String(c.compraFolio||c.compraOriginal||'')===String(target.folio);const bySnapshot=[c.original,c.corregida].some(x=>x&&['fecha','codigo','prod','cant','costo','total'].every(k=>String(x[k]??'')===String(target[k]??'')));return byFolio||bySnapshot});if(audited){alert('No se puede borrar esta compra porque tiene correcciones auditadas. Conserva la trazabilidad histórica.');return}if(!confirm('¿Borrar esta compra? La existencia que proviene de esta entrada también se revertirá.'))return;const old=data.compras[i];data.compras.splice(i,1);try{await save();}catch(err){data.compras.splice(i,0,old);$('qCapStatus').textContent='⚠️ No se pudo borrar la compra: '+(err.message||err);return}renderCompras();renderInv();renderApartadoCatalog();renderHome();$('qCapStatus').textContent='Compra eliminada.'}
+async function deleteCompra(i){
+  const target=data.compras[i];if(!target)return;
+  const code=String(target.codigo||'').trim();
+  const audited=(data.correccionesCompras||[]).some(c=>{
+    const byFolio=!!target.folio&&String(c.compraFolio||c.compraOriginal||'')===String(target.folio);
+    const bySnapshot=[c.original,c.corregida].some(x=>x&&['fecha','codigo','prod','cant','costo','total'].every(k=>String(x[k]??'')===String(target[k]??'')));
+    return byFolio||bySnapshot;
+  });
+  if(audited){alert('No se puede borrar esta compra porque tiene correcciones auditadas. Conserva la trazabilidad histórica.');return}
+  if(code){
+    const sold=(Array.isArray(data.ventas)?data.ventas:[]).some(x=>String(x.codigo||'').trim()===code);
+    const adjusted=(Array.isArray(data.inventarioManual)?data.inventarioManual:[]).some(x=>String(x.codigo||'').trim()===code);
+    const reserved=(Array.isArray(data.apartados)?data.apartados:[]).some(x=>String(x.codigo||'').trim()===code);
+    const ordered=(Array.isArray(data.pedidosEspeciales)?data.pedidosEspeciales:[]).some(x=>String(x.codigo||'').trim()===code);
+    const corrected=(data.correccionesCompras||[]).some(x=>String(x.codigo||x.original?.codigo||x.corregida?.codigo||'').trim()===code);
+    if(sold||adjusted||reserved||ordered||corrected){
+      alert('No se puede borrar esta compra porque el SKU '+code+' tiene movimientos o relaciones históricas (ventas, ajustes, apartados, pedidos o correcciones). Para rectificarla utiliza «Corregir»; así se conserva la trazabilidad y no se alteran existencias ni costos históricos.');
+      return;
+    }
+  }
+  if(!confirm('¿Borrar esta línea de compra? La entrada correspondiente se retirará del inventario. Esta acción no se puede deshacer.'))return;
+  const old=data.compras[i];data.compras.splice(i,1);
+  try{await save()}catch(err){data.compras.splice(i,0,old);window.data=data;$('qCapStatus').textContent='⚠️ No se pudo borrar la compra: '+(err.message||err);return}
+  renderCompras();renderInv();renderApartadoCatalog();renderHome();$('qCapStatus').textContent='Compra eliminada.';
+}
 function usedProductCodes(){const codes=new Set();(Array.isArray(data.productos)?data.productos:[]).forEach(x=>{if(x&&x.codigo)codes.add(String(x.codigo).trim().toUpperCase())});['compras','ventas','inventarioManual','apartados','movimientosApartados','correccionesCompras','correccionesApartados','pedidosEspeciales'].forEach(k=>(Array.isArray(data[k])?data[k]:[]).forEach(x=>{if(x&&x.codigo)codes.add(String(x.codigo).trim().toUpperCase());if(x&&x.original&&x.original.codigo)codes.add(String(x.original.codigo).trim().toUpperCase());if(x&&x.corregida&&x.corregida.codigo)codes.add(String(x.corregida.codigo).trim().toUpperCase());if(x&&x.antes&&x.antes.codigo)codes.add(String(x.antes.codigo).trim().toUpperCase());if(x&&x.despues&&x.despues.codigo)codes.add(String(x.despues.codigo).trim().toUpperCase())}));return codes}
 function generateUniqueProductSKU(prod){const base=String(prod||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[^A-Z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,28)||'PRODUCTO',root='AUTO-'+base,used=usedProductCodes();let candidate=root,n=2;while(used.has(candidate)){candidate=root+'-'+String(n).padStart(2,'0');n++}return candidate}
 function invAutoCode(prod){const key=normalizeProductName(prod);if(key){const matches=new Map();[...(Array.isArray(data.productos)?data.productos:[]),...(Array.isArray(data.compras)?data.compras:[])].forEach(x=>{if(!x||!x.codigo||normalizeProductName(x.nombre||x.prod)!==key)return;const code=String(x.codigo).trim();if(code)matches.set(code,code)});if(matches.size===1)return [...matches.values()][0];if(matches.size>1)return ''}return generateUniqueProductSKU(prod)}
