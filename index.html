@@ -1254,7 +1254,7 @@ async function saveVCore(){
         importe:Number(amount.toFixed(2)),
         cant:qty,
         unitPrice:unit,
-        costoUnitario:Number.isFinite(Number(x.costoUnitario))?Number(x.costoUnitario):0,
+        costoUnitario:x.costoUnitario!==null&&x.costoUnitario!==undefined&&x.costoUnitario!==''&&Number.isFinite(Number(x.costoUnitario))?Number(x.costoUnitario):null,
         tipo:x.tipo||'venta',
         motivo:x.motivo||'',
         obs:(x.tipo&&x.tipo!=='venta')?'Salida de mercancía: '+saleTypeLabel(x.tipo):'Venta mediante ticket',
