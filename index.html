@@ -1191,7 +1191,7 @@ function saleCodeChanged(){const code=$('vCodigo').value.trim();if(!code)return;
 function saleProductChanged(){const desc=String($('vDesc')?.value||'').trim();if(!desc)return;const buys=effectiveCompras(),codes=[...new Set([...buys.map(x=>x.codigo),...(data.productos||[]).map(x=>x.codigo)].filter(Boolean))].sort(),exact=codes.filter(code=>saleProductOptionLabel(code,codes)===desc);if(exact.length===1){$('vCodigo').value=exact[0];saleCodeChanged();return}const matches=codes.filter(code=>normalizeProductName(productLabel(code,(buys.slice().reverse().find(x=>String(x.codigo||'')===String(code))||{}).prod||''))===normalizeProductName(desc));if(matches.length>1){$('vCodigo').value='';$('vPrecio').value='';updateSaleLineTotal();alert('Hay varios productos con ese nombre. Selecciona la opción que muestra marca/modelo/SKU o captura directamente el código exacto. No se asignó ningún producto.');return}if(matches.length===1){$('vCodigo').value=matches[0];saleCodeChanged()}}
 function updateSaleLineTotal(){const q=Number($('vCant').value||0),p=Number($('vPrecio').value||0);$('vLineaTotal').value=money((Number.isFinite(q)?q:0)*(Number.isFinite(p)?p:0));}
 function saleTypeChanged(){const t=$('vTipo').value||'venta';const pago=$('vPago');if(t!=='venta'){$('vPrecio').value='0';$('vPrecio').readOnly=true;if(pago){pago.value='No aplica';pago.disabled=true}}else{$('vPrecio').readOnly=false;if(pago){pago.disabled=false;if(pago.value==='No aplica')pago.value='No especificado'}}$('vStatus').textContent=t==='venta'?'Operación normal: captura el precio de venta.':'Salida sin cobro: se registra en $0 y la forma de pago no aplica.'}
-function addSaleLine(){const desc=$('vDesc').value.trim(),qty=Number($('vCant').value||0),type=$('vTipo').value||'venta';let price=Number($('vPrecio').value);if(type!=='venta')price=0;if(!desc||!Number.isFinite(qty)||qty<1||!Number.isFinite(price)||price<0){$('vStatus').textContent='Completa producto, cantidad y datos válidos antes de agregar.';return}const code=$('vCodigo').value.trim();const cost=costByCode(code);const motivo=$('vMotivo').value.trim();saleCart.push({codigo:code,desc,cant:qty,unitPrice:price,importe:qty*price,costoUnitario:cost,tipo:type,motivo});clearSaleLine(false);renderSaleCart();$('vStatus').textContent='Producto agregado al ticket.'}
+function addSaleLine(){const desc=$('vDesc').value.trim(),qty=Number($('vCant').value||0),type=$('vTipo').value||'venta';let price=Number($('vPrecio').value);if(type!=='venta')price=0;if(!desc||!Number.isFinite(qty)||qty<1||!Number.isFinite(price)||price<0){$('vStatus').textContent='Completa producto, cantidad y datos válidos antes de agregar.';return}const code=$('vCodigo').value.trim();if(!code){$('vStatus').textContent='⚠️ Selecciona el producto desde el catálogo o captura su SKU. No se agregó la línea para evitar una venta sin descuento de inventario.';$('vCodigo').focus();return}const knownCodes=new Set([...(effectiveCompras().map(x=>String(x.codigo||'').trim())),...((data.productos||[]).map(x=>String(x.codigo||'').trim()))].filter(Boolean));if(!knownCodes.has(code)){$('vStatus').textContent='⚠️ El SKU no existe en el catálogo de Inventario/Compras. No se agregó la línea.';$('vCodigo').focus();return}const product=productRecord(code);if(product&&product.activo===false){$('vStatus').textContent='⚠️ El producto está dado de baja. Reactívalo desde Inventario antes de venderlo.';return}const cost=costByCode(code);const motivo=$('vMotivo').value.trim();saleCart.push({codigo:code,desc,cant:qty,unitPrice:price,importe:qty*price,costoUnitario:cost,tipo:type,motivo});clearSaleLine(false);renderSaleCart();$('vStatus').textContent='Producto agregado al ticket.'}
 function clearSaleLine(full=true){['vCodigo','vDesc','vPrecio','vMotivo'].forEach(id=>$(id).value='');$('vCant').value='1';$('vTipo').value='venta';saleTypeChanged();updateSaleLineTotal();if(full)$('vStatus').textContent=''}
 function removeSaleLine(i){saleCart.splice(i,1);renderSaleCart()}
 function saleTypeLabel(t){return t==='cortesia'?'🎁 Cortesía':t==='promocion'?'🏷️ Promoción':t==='garantia'?'🔧 Garantía':'🛒 Venta'}
@@ -1233,14 +1233,22 @@ async function saveVCore(){
       if(!String(x.desc||'').trim() || !Number.isFinite(qty) || qty<=0 || !Number.isFinite(unit) || unit<0 || !Number.isFinite(amount) || amount<0){
         throw new Error('Hay una línea del ticket con producto, cantidad o importe inválido.');
       }
-      const catalogProduct=x.codigo?productRecord(x.codigo):null;
-      if(catalogProduct&&catalogProduct.activo===false&&(!editing||!originalTicketRows.some(row=>String(row.codigo||'')===String(x.codigo))))throw new Error('El producto '+x.codigo+' está dado de baja. Reactívalo desde Inventario antes de venderlo.');
+      const code=String(x.codigo||'').trim();
+      if(!code){
+        const legacyUncoded=editing&&originalTicketRows.some(row=>!String(row.codigo||'').trim()&&String(row.desc||'').trim()===String(x.desc||'').trim()&&Number(row.cant||1)===qty&&Number(row.importe||0)===amount&&(row.tipo||'venta')===(x.tipo||'venta'));
+        if(!legacyUncoded)throw new Error('Cada producto nuevo debe estar vinculado a un SKU del catálogo. El ticket original se conserva sin cambios.');
+      }else{
+        const knownCodes=new Set([...(effectiveCompras().map(row=>String(row.codigo||'').trim())),...((data.productos||[]).map(row=>String(row.codigo||'').trim()))].filter(Boolean));
+        if(!knownCodes.has(code))throw new Error('El SKU '+code+' no existe en el catálogo de Inventario/Compras.');
+        const catalogProduct=productRecord(code);
+        if(catalogProduct&&catalogProduct.activo===false&&!originalTicketRows.some(row=>String(row.codigo||'').trim()===code))throw new Error('El producto '+code+' está dado de baja. Reactívalo desde Inventario antes de venderlo.');
+      }
       return {
         ticket,
         fecha:$('vFecha').value,
         hora,
         desc:String(x.desc).trim(),
-        codigo:x.codigo||'',
+        codigo:String(x.codigo||'').trim(),
         importe:Number(amount.toFixed(2)),
         cant:qty,
         unitPrice:unit,
