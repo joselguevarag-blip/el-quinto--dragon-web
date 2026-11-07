@@ -1448,6 +1448,7 @@ async function saveC(){
     if(cashRaw===''||!Number.isFinite(efectivo)||efectivo<0){alert('Captura el efectivo contado. Debe ser un importe válido igual o mayor que cero.');return}
     const jornada=(data.jornadas||[]).find(x=>x&&x.fecha===fecha&&x.estado==='no_abierto');
     if(jornada){alert('No se puede registrar un cierre: este día está marcado como NO ABIERTO ('+jornadaLabel(jornada)+').');return}
+    if((data.cierres||[]).some(x=>x&&x.fecha===fecha)){alert('Ya existe un cierre registrado para esa fecha. No se creó un cierre duplicado.');return}
     if(!data.aperturas.some(x=>x&&x.fecha===fecha)){alert('No se puede registrar el cierre sin una apertura de ese día. Si el negocio no abrió, regístralo en Apertura como día sin apertura.');return}
     const cierre={fecha,hora,efectivo};
     data.cierres.push(cierre);
