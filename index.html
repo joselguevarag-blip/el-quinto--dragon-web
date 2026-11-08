@@ -1017,12 +1017,33 @@ async function ensureJornadasSchema(){
     try{await save();}catch(e){}
   }
 }
+let pendingSaleStockValidation=null;
+function availableStockFromSnapshot(snapshot,code){
+  const c=String(code||'').trim();
+  if(!snapshot||!c)return 0;
+  const buys=(Array.isArray(snapshot.compras)?snapshot.compras:[]).filter(x=>x&&x._estado!=='CORREGIDA'&&x._estado!=='ANULADA'&&String(x.codigo||'').trim()===c);
+  const sales=(Array.isArray(snapshot.ventas)?snapshot.ventas:[]).filter(x=>String(x.codigo||'').trim()===c);
+  const movements=(Array.isArray(snapshot.inventarioManual)?snapshot.inventarioManual:[]).filter(x=>String(x.codigo||'').trim()===c);
+  const purchases=buys.reduce((sum,x)=>sum+Number(x.cant||0),0);
+  const sold=sales.reduce((sum,x)=>sum+Number(x.cant||1),0);
+  let entries=0,exits=0;
+  movements.forEach(x=>{
+    if(x&&x.tipo==='CORRECCION_CONTEO'){entries+=Number(x.deltaEntradas||0);exits+=Number(x.deltaSalidas||0);return}
+    const raw=x&&x.delta;
+    if(raw!==undefined&&raw!==null&&raw!==''&&Number.isFinite(Number(raw))){entries+=Math.max(0,Number(raw));exits+=Math.max(0,-Number(raw));return}
+    if(x&&x.tipo==='entrada')entries+=Number(x.cantidad||0);
+    else if(x&&x.tipo==='salida')exits+=Number(x.cantidad||0);
+  });
+  const reserved=(Array.isArray(snapshot.apartados)?snapshot.apartados:[]).filter(x=>String(x.codigo||'').trim()===c&&!['cancelado','entregado','vencido'].includes(String(x.estado||'').trim().toLowerCase())).reduce((sum,x)=>sum+Number(x.cantidad||1),0);
+  return purchases+entries-sold-exits-reserved;
+}
 async function save(){
   const persist=async()=>{
     if(recoveryDecisionPending)throw new Error('RECUPERACIÓN PENDIENTE. Hay datos o respaldos que requieren una decisión explícita. Conserva o restaura la información desde el aviso de protección antes de guardar.');
     const previous=localStorage.getItem(KEY);
     lastSaveTicketRemaps=[];
     let candidateData=data;
+    let stockBaseline=lastKnownData;
     if(lastKnownPayload!==null && previous!==lastKnownPayload){
       let remote=null;
       try{remote=JSON.parse(previous||'null')}catch(e){}
@@ -1030,11 +1051,18 @@ async function save(){
         preserveConcurrentConflict(lastKnownData,data,remote,'La base guardada cambió o dejó de ser válida.');
         throw new Error('CONFLICTO ENTRE PESTAÑAS. No se sobrescribió la base guardada. Descarga el archivo de recuperación que apareció en pantalla.');
       }
+      stockBaseline=remote;
       try{
         candidateData=mergeConcurrentValue(lastKnownData,data,remote,'datos');
       }catch(err){
         preserveConcurrentConflict(lastKnownData,data,remote,err&&err.message?err.message:String(err));
         throw new Error('CONFLICTO ENTRE PESTAÑAS. '+(err&&err.message?err.message:'No se pudieron conciliar los cambios')+'. No se sobrescribieron los datos guardados. Descarga el archivo de recuperación que apareció en pantalla.');
+      }
+    }
+    if(pendingSaleStockValidation&&Array.isArray(pendingSaleStockValidation.increments)){
+      for(const item of pendingSaleStockValidation.increments){
+        const available=availableStockFromSnapshot(stockBaseline,item.codigo);
+        if(item.cantidad>available)throw new Error('VENTA BLOQUEADA POR CONFLICTO DE INVENTARIO: '+item.codigo+' tiene '+Math.max(0,available)+' unidades disponibles al conciliar las pestañas y se intentan agregar '+item.cantidad+'. No se guardó el ticket.');
       }
     }
     try{candidateData._lastSavedAt=new Date().toISOString()}catch(e){}
@@ -1191,7 +1219,39 @@ function saleCodeChanged(){const code=$('vCodigo').value.trim();if(!code)return;
 function saleProductChanged(){const desc=String($('vDesc')?.value||'').trim();if(!desc)return;const buys=effectiveCompras(),codes=[...new Set([...buys.map(x=>x.codigo),...(data.productos||[]).map(x=>x.codigo)].filter(Boolean))].sort(),exact=codes.filter(code=>saleProductOptionLabel(code,codes)===desc);if(exact.length===1){$('vCodigo').value=exact[0];saleCodeChanged();return}const matches=codes.filter(code=>normalizeProductName(productLabel(code,(buys.slice().reverse().find(x=>String(x.codigo||'')===String(code))||{}).prod||''))===normalizeProductName(desc));if(matches.length>1){$('vCodigo').value='';$('vPrecio').value='';updateSaleLineTotal();alert('Hay varios productos con ese nombre. Selecciona la opción que muestra marca/modelo/SKU o captura directamente el código exacto. No se asignó ningún producto.');return}if(matches.length===1){$('vCodigo').value=matches[0];saleCodeChanged()}}
 function updateSaleLineTotal(){const q=Number($('vCant').value||0),p=Number($('vPrecio').value||0);$('vLineaTotal').value=money((Number.isFinite(q)?q:0)*(Number.isFinite(p)?p:0));}
 function saleTypeChanged(){const t=$('vTipo').value||'venta';const pago=$('vPago');if(t!=='venta'){$('vPrecio').value='0';$('vPrecio').readOnly=true;if(pago){pago.value='No aplica';pago.disabled=true}}else{$('vPrecio').readOnly=false;if(pago){pago.disabled=false;if(pago.value==='No aplica')pago.value='No especificado'}}$('vStatus').textContent=t==='venta'?'Operación normal: captura el precio de venta.':'Salida sin cobro: se registra en $0 y la forma de pago no aplica.'}
-function addSaleLine(){const desc=$('vDesc').value.trim(),qty=Number($('vCant').value||0),type=$('vTipo').value||'venta';let price=Number($('vPrecio').value);if(type!=='venta')price=0;if(!desc||!Number.isFinite(qty)||qty<1||!Number.isFinite(price)||price<0){$('vStatus').textContent='Completa producto, cantidad y datos válidos antes de agregar.';return}let code=$('vCodigo').value.trim();const buys=effectiveCompras(),knownCodes=[...new Set([...buys.map(x=>String(x.codigo||'').trim()),...((data.productos||[]).map(x=>String(x.codigo||'').trim()))].filter(Boolean))];if(!code){const matches=knownCodes.filter(c=>{const row=buys.slice().reverse().find(x=>String(x.codigo||'').trim()===c);return normalizeProductName(productLabel(c,row&&row.prod||c))===normalizeProductName(desc)});if(matches.length===1){code=matches[0];$('vCodigo').value=code}else if(matches.length>1){$('vStatus').textContent='⚠️ Hay varios productos del inventario con ese nombre. Selecciona el SKU exacto antes de agregar.';$('vCodigo').focus();return}}if(code&&!knownCodes.includes(code)){$('vStatus').textContent='⚠️ El SKU no existe en el catálogo de Inventario/Compras. No se agregó la línea.';$('vCodigo').focus();return}const product=code?productRecord(code):null;if(product&&product.activo===false){$('vStatus').textContent='⚠️ El producto está dado de baja. Reactívalo desde Inventario antes de venderlo.';return}const cost=code?costByCode(code):null;const motivo=$('vMotivo').value.trim();saleCart.push({codigo:code,desc,cant:qty,unitPrice:price,importe:qty*price,costoUnitario:cost,tipo:type,motivo});clearSaleLine(false);renderSaleCart();$('vStatus').textContent=code?'Producto agregado al ticket.':'Servicio agregado al ticket; no afecta existencias de inventario.'}
+function saleAvailableStock(code,ticketBeingEdited){
+  const c=String(code||'').trim();
+  if(!c)return 0;
+  const physical=inventoryStockBreakdown(c).existencia;
+  const reserved=apartadoReserved(c);
+  const restored=(ticketBeingEdited?data.ventas.filter(row=>String(row.ticket||'')===String(ticketBeingEdited)&&String(row.codigo||'').trim()===c).reduce((sum,row)=>sum+Number(row.cant||1),0):0);
+  return physical-reserved+restored;
+}
+function addSaleLine(){
+  const desc=$('vDesc').value.trim(),qty=Number($('vCant').value||0),type=$('vTipo').value||'venta';
+  let price=Number($('vPrecio').value);if(type!=='venta')price=0;
+  if(!desc||!Number.isFinite(qty)||qty<1||!Number.isFinite(price)||price<0){$('vStatus').textContent='Completa producto, cantidad y datos válidos antes de agregar.';return}
+  let code=$('vCodigo').value.trim();
+  const buys=effectiveCompras(),knownCodes=[...new Set([...buys.map(x=>String(x.codigo||'').trim()),...((data.productos||[]).map(x=>String(x.codigo||'').trim()))].filter(Boolean))];
+  if(!code){
+    const matches=knownCodes.filter(c=>{const row=buys.slice().reverse().find(x=>String(x.codigo||'').trim()===c);return normalizeProductName(productLabel(c,row&&row.prod||c))===normalizeProductName(desc)});
+    if(matches.length===1){code=matches[0];$('vCodigo').value=code}
+    else if(matches.length>1){$('vStatus').textContent='⚠️ Hay varios productos del inventario con ese nombre. Selecciona el SKU exacto antes de agregar.';$('vCodigo').focus();return}
+  }
+  if(code&&!knownCodes.includes(code)){$('vStatus').textContent='⚠️ El SKU no existe en el catálogo de Inventario/Compras. No se agregó la línea.';$('vCodigo').focus();return}
+  const product=code?productRecord(code):null;
+  if(product&&product.activo===false){$('vStatus').textContent='⚠️ El producto está dado de baja. Reactívalo desde Inventario antes de venderlo.';return}
+  if(code){
+    const available=saleAvailableStock(code,vEditTicket);
+    const alreadyInCart=saleCart.filter(row=>String(row.codigo||'').trim()===code).reduce((sum,row)=>sum+Number(row.cant||0),0);
+    const remaining=available-alreadyInCart;
+    if(qty>remaining){$('vStatus').textContent='⚠️ Existencia disponible insuficiente para '+code+'. Disponibles: '+Math.max(0,remaining)+'. Solicitadas: '+qty+'. Se descuentan las unidades apartadas.';$('vCodigo').focus();return}
+  }
+  const cost=code?costByCode(code):null,motivo=$('vMotivo').value.trim();
+  saleCart.push({codigo:code,desc,cant:qty,unitPrice:price,importe:qty*price,costoUnitario:cost,tipo:type,motivo});
+  clearSaleLine(false);renderSaleCart();
+  $('vStatus').textContent=code?'Producto agregado al ticket.':'Servicio agregado al ticket; no afecta existencias de inventario.';
+}
 function clearSaleLine(full=true){['vCodigo','vDesc','vPrecio','vMotivo'].forEach(id=>$(id).value='');$('vCant').value='1';$('vTipo').value='venta';saleTypeChanged();updateSaleLineTotal();if(full)$('vStatus').textContent=''}
 function removeSaleLine(i){saleCart.splice(i,1);renderSaleCart()}
 function saleTypeLabel(t){return t==='cortesia'?'🎁 Cortesía':t==='promocion'?'🏷️ Promoción':t==='garantia'?'🔧 Garantía':'🛒 Venta'}
@@ -1254,16 +1314,29 @@ async function saveVCore(){
         importe:Number(amount.toFixed(2)),
         cant:qty,
         unitPrice:unit,
-        costoUnitario:x.costoUnitario!==null&&x.costoUnitario!==undefined&&x.costoUnitario!==''&&Number.isFinite(Number(x.costoUnitario))?Number(x.costoUnitario):null,
+        costoUnitario:Number.isFinite(Number(x.costoUnitario))?Number(x.costoUnitario):0,
         tipo:x.tipo||'venta',
         motivo:x.motivo||'',
         obs:(x.tipo&&x.tipo!=='venta')?'Salida de mercancía: '+saleTypeLabel(x.tipo):'Venta mediante ticket',
         pago:(x.tipo&&x.tipo!=='venta')?'No aplica':pago
       };
     });
+    const requestedByCode=new Map();
+    newRows.forEach(row=>{const code=String(row.codigo||'').trim();if(code)requestedByCode.set(code,(requestedByCode.get(code)||0)+Number(row.cant||1))});
+    const stockIncrements=[];
+    for(const [code,requested] of requestedByCode){
+      const originalUnits=editing?originalTicketRows.filter(row=>String(row.codigo||'').trim()===code).reduce((sum,row)=>sum+Number(row.cant||1),0):0;
+      const additional=Math.max(0,requested-originalUnits);
+      const available=inventoryStockBreakdown(code).existencia-apartadoReserved(code);
+      if(additional>available)throw new Error('Existencia disponible insuficiente para '+code+'. Disponibles: '+Math.max(0,available)+'. Unidades adicionales solicitadas: '+additional+'. Se descuentan las unidades apartadas.');
+      if(additional>0)stockIncrements.push({codigo:code,cantidad:additional});
+    }
+    pendingSaleStockValidation={increments:stockIncrements};
     data.ventas = (editing ? oldVentas.filter(x=>String(x.ticket||'')!==ticket) : oldVentas.slice()).concat(newRows);
     await save();
+    pendingSaleStockValidation=null;
   } catch(err) {
+    pendingSaleStockValidation=null;
     // Restaurar en memoria el ticket completo si la validación o persistencia falla.
     data.ventas = oldVentas;
     window.data=data;
@@ -1448,7 +1521,6 @@ async function saveC(){
     if(cashRaw===''||!Number.isFinite(efectivo)||efectivo<0){alert('Captura el efectivo contado. Debe ser un importe válido igual o mayor que cero.');return}
     const jornada=(data.jornadas||[]).find(x=>x&&x.fecha===fecha&&x.estado==='no_abierto');
     if(jornada){alert('No se puede registrar un cierre: este día está marcado como NO ABIERTO ('+jornadaLabel(jornada)+').');return}
-    if((data.cierres||[]).some(x=>x&&x.fecha===fecha)){alert('Ya existe un cierre registrado para esa fecha. No se creó un cierre duplicado.');return}
     if(!data.aperturas.some(x=>x&&x.fecha===fecha)){alert('No se puede registrar el cierre sin una apertura de ese día. Si el negocio no abrió, regístralo en Apertura como día sin apertura.');return}
     const cierre={fecha,hora,efectivo};
     data.cierres.push(cierre);
@@ -2368,16 +2440,37 @@ async function importBackupFile(input){
     if(!validBase(imported))throw new Error('El archivo no contiene una base válida de ventas y compras. No se modificó nada.');
     const counts={ventas:imported.ventas.length,compras:imported.compras.length,apartados:Array.isArray(imported.apartados)?imported.apartados.length:0};
     if(!confirm('Vas a restaurar un respaldo JSON con '+counts.ventas+' ventas, '+counts.compras+' líneas de compra y '+counts.apartados+' apartados. Los datos actuales se conservarán en copias locales antes del cambio. ¿Continuar?'))return;
-    const currentRaw=localStorage.getItem(KEY)||JSON.stringify(data),importedData=cloneJSON(imported);
-    for(const k of ['pedidosEspeciales','correccionesCompras','movimientosApartados','correccionesApartados'])if(!Array.isArray(importedData[k]))importedData[k]=[];
-    ensureProductCatalog(importedData);
-    const payload=JSON.stringify(importedData);
-    writeRecoverySnapshot(KEY+'_PRE_IMPORT',currentRaw);
-    writeRecoverySnapshot(KEY+'_AUTOBACKUP',currentRaw);
-    localStorage.setItem(KEY,payload);
-    if(localStorage.getItem(KEY)!==payload){localStorage.setItem(KEY,currentRaw);throw new Error('No se pudo verificar la restauración. Se recuperó la base anterior.');}
-    data=importedData;ensureApartadosSchema();lastKnownPayload=payload;lastKnownData=cloneJSON(data);window.data=data;recoveryDecisionPending=false;autoBackupRecoveryNeeded=false;
-    alert('Respaldo restaurado y verificado. La copia anterior quedó protegida localmente. El sistema se actualizará.');window.location.reload();
+    const restore=async()=>{
+      const storedCurrentRaw=localStorage.getItem(KEY);
+      const currentRaw=storedCurrentRaw===null?JSON.stringify(data):storedCurrentRaw;
+      const importedData=cloneJSON(imported);
+      for(const k of ['pedidosEspeciales','correccionesCompras','movimientosApartados','correccionesApartados'])if(!Array.isArray(importedData[k]))importedData[k]=[];
+      ensureProductCatalog(importedData);
+      const payload=JSON.stringify(importedData);
+      writeRecoverySnapshot(KEY+'_PRE_IMPORT',currentRaw);
+      const priorAutoBackupRaw=localStorage.getItem(KEY+'_AUTOBACKUP');
+      if(priorAutoBackupRaw!==null)writeRecoverySnapshot(KEY+'_AUTOBACKUP_BEFORE_IMPORT',priorAutoBackupRaw);
+      localStorage.setItem(KEY+'_AUTOBACKUP',currentRaw);
+      if(localStorage.getItem(KEY+'_AUTOBACKUP')!==currentRaw)throw new Error('No se pudo verificar el respaldo de los datos actuales. No se modificó la base principal.');
+      localStorage.setItem(KEY,payload);
+      if(localStorage.getItem(KEY)!==payload){
+        try{
+          localStorage.setItem(KEY,currentRaw);
+          if(localStorage.getItem(KEY)!==currentRaw)throw new Error('La base anterior no coincide después de intentar reponerla.');
+        }catch(restoreErr){
+          recoveryDecisionPending=true;
+          throw new Error('La restauración no se pudo verificar y tampoco fue posible reponer la base anterior. Conserva las copias PRE_IMPORT y AUTOBACKUP antes de continuar. '+(restoreErr&&restoreErr.message?restoreErr.message:'error de almacenamiento'));
+        }
+        throw new Error('No se pudo verificar la restauración. Se recuperó la base anterior.');
+      }
+      data=importedData;ensureApartadosSchema();lastKnownPayload=payload;lastKnownData=cloneJSON(data);window.data=data;recoveryDecisionPending=false;autoBackupRecoveryNeeded=false;
+      return true;
+    };
+    if(typeof navigator!=='undefined'&&navigator.locks&&typeof navigator.locks.request==='function'){
+      await navigator.locks.request(KEY+'_SAVE_LOCK_V1',{mode:'exclusive'},restore);
+    }else await restore();
+    alert('Respaldo restaurado y verificado. La copia anterior quedó protegida localmente. El sistema se actualizará.');
+    window.location.reload();
   }catch(err){alert('No se restauró el archivo: '+(err&&err.message?err.message:String(err)));}
   finally{if(input)input.value='';}
 }
